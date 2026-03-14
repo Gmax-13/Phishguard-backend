@@ -35,36 +35,36 @@ headers = {
 
 LR_PATH = hf_hub_download(
     repo_id=HF_MODEL_REPO,
-    filename="logistic_model.pkl"
+    filename="logistic_model.pkl",
     cache_dir="/tmp"
 )
 RF_PATH = hf_hub_download(
     repo_id=HF_MODEL_REPO,
-    filename="random_forest_model.pkl"
+    filename="random_forest_model.pkl",
     cache_dir="/tmp"
 )
 
 VECT_PATH = hf_hub_download(
     repo_id=HF_MODEL_REPO,
-    filename="tfidf_vectorizer.pkl"
+    filename="tfidf_vectorizer.pkl",
     cache_dir="/tmp"
 )
 
 LSTM_MODEL_PATH = hf_hub_download(
     repo_id=HF_MODEL_REPO,
-    filename="lstm_phishing_model.keras"
+    filename="lstm_phishing_model.keras",
     cache_dir="/tmp"
 )
 
 TOKENIZER_PATH = hf_hub_download(
     repo_id=HF_MODEL_REPO,
-    filename="tokenizer.pkl"
+    filename="tokenizer.pkl",
     cache_dir="/tmp"
 )
 
 BILSTM_MODEL_PATH = hf_hub_download(
     repo_id=HF_MODEL_REPO,
-    filename="bilstm_attn_model.h5"
+    filename="bilstm_attn_model.h5",
     cache_dir="/tmp"
 )
 
