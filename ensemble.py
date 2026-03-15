@@ -1,106 +1,38 @@
 import os
+import json
 import requests
-import joblib
 import numpy as np
-import tensorflow as tf
-import warnings
-
 from dotenv import load_dotenv
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing.sequence import pad_sequences
-from tensorflow.keras.layers import Layer
-from keras.initializers import Orthogonal
-
 from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
+from cachetools import TTLCache
 
-from huggingface_hub import hf_hub_download
 from database import system_collection
-
-
-warnings.filterwarnings("ignore")
 
 load_dotenv()
 
 # -----------------------------
-# HuggingFace Config
+# HuggingFace API Configuration
 # -----------------------------
+
 HF_TOKEN = os.getenv("HF_TOKEN")
-HF_MODEL_REPO = os.getenv("HF_MODEL_REPO")
-BERT_API_URL = os.getenv("BERT_API_URL")
 
-headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+LR_API = os.getenv("LR_API")
+RF_API = os.getenv("RF_API")
+LSTM_API = os.getenv("LSTM_API")
+BILSTM_API = os.getenv("BILSTM_API")
+BERT_API = os.getenv("BERT_API")
 
-# -----------------------------
-# Download Models
-# -----------------------------
-CACHE_DIR = "/tmp/model_cache"
-os.makedirs(CACHE_DIR, exist_ok=True)
+session = requests.Session()
 
-print("Downloading models from HuggingFace...")
-
-LR_PATH = hf_hub_download(repo_id=HF_MODEL_REPO, filename="logistic_model.pkl",cache_dir=CACHE_DIR)
-RF_PATH = hf_hub_download(repo_id=HF_MODEL_REPO, filename="random_forest_model.pkl",cache_dir=CACHE_DIR)
-VECT_PATH = hf_hub_download(repo_id=HF_MODEL_REPO, filename="tfidf_vectorizer.pkl",cache_dir=CACHE_DIR)
-TOKENIZER_PATH = hf_hub_download(repo_id=HF_MODEL_REPO, filename="tokenizer.pkl",cache_dir=CACHE_DIR)
-
-LSTM_MODEL_PATH = hf_hub_download(repo_id=HF_MODEL_REPO, filename="lstm_phishing_model.keras",cache_dir=CACHE_DIR)
-BILSTM_MODEL_PATH = hf_hub_download(repo_id=HF_MODEL_REPO, filename="bilstm_attn_model.h5",cache_dir=CACHE_DIR)
-
-LSTM_MAXLEN = 100
+session.headers.update({
+    "Authorization": f"Bearer {HF_TOKEN}",
+    "Content-Type": "application/json"
+})
 
 # -----------------------------
-# Lazy Model Loader
+# Ensemble Weights
 # -----------------------------
-models_loaded = False
 
-lr = None
-rf = None
-vectorizer = None
-tokenizer = None
-lstm_model = None
-bilstm_model = None
-
-
-def load_models():
-
-    global models_loaded
-    global lr, rf, vectorizer, tokenizer
-    global lstm_model, bilstm_model
-
-    if models_loaded:
-        return
-
-    print("Loading models into memory...")
-
-    lr = joblib.load(LR_PATH)
-    rf = joblib.load(RF_PATH)
-    vectorizer = joblib.load(VECT_PATH)
-
-    tokenizer = joblib.load(TOKENIZER_PATH)
-
-    lstm_model = load_model(
-        LSTM_MODEL_PATH,
-        compile=False,
-        custom_objects={"Orthogonal": Orthogonal}
-    )
-
-    bilstm_model = load_model(
-        BILSTM_MODEL_PATH,
-        custom_objects={
-            "AttentionLayer": AttentionLayer,
-            "Orthogonal": Orthogonal
-        },
-        compile=False
-    )
-
-    models_loaded = True
-
-    print("Models loaded successfully")
-
-# -----------------------------
-# Default Weights
-# -----------------------------
 DEFAULT_WEIGHTS = {
     "lr": 0.25,
     "rf": 0.15,
@@ -115,48 +47,32 @@ if stored and "weights" in stored:
     WEIGHTS = stored["weights"]
 else:
     WEIGHTS = DEFAULT_WEIGHTS.copy()
+
     system_collection.update_one(
         {"_id": "ensemble_weights"},
         {"$set": {"weights": WEIGHTS}},
         upsert=True
     )
 
-CLASS_LABELS = {0: "legitimate_email", 1: "phishing_email"}
-
-
-# -----------------------------
-# Attention Layer
-# -----------------------------
-class AttentionLayer(Layer):
-
-    def build(self, input_shape):
-        self.W = self.add_weight(
-            shape=(input_shape[-1],),
-            initializer="glorot_uniform",
-            trainable=True
-        )
-
-    def call(self, inputs):
-        score = tf.tensordot(inputs, self.W, axes=1)
-        weights = tf.nn.softmax(score, axis=1)
-
-        context = tf.reduce_sum(
-            inputs * tf.expand_dims(weights, -1),
-            axis=1
-        )
-        return context
+CLASS_LABELS = {
+    0: "legitimate_email",
+    1: "phishing_email"
+}
 
 # -----------------------------
-# Cache
+# Prediction Cache
 # -----------------------------
-prediction_cache = {}
 
+prediction_cache = TTLCache(
+    maxsize=2000,
+    ttl=3600
+)
 
 # -----------------------------
-# Cached BERT API
+# HuggingFace API Call
 # -----------------------------
-@lru_cache(maxsize=5000)
-def cached_bert(text):
+
+def query_model(api_url, text):
 
     payload = {
         "inputs": text[:2000],
@@ -165,12 +81,16 @@ def cached_bert(text):
 
     try:
 
-        r = requests.post(BERT_API_URL, headers=headers, json=payload, timeout=15)
+        r = session.post(
+            api_url,
+            json=payload,
+            timeout=8
+        )
 
         if r.status_code != 200:
-            return (0.5, 0.5)
+            return np.array([0.5, 0.5])
 
-        result = r.json()
+        result = json.loads(r.text)
 
         if isinstance(result, list) and isinstance(result[0], list):
             result = result[0]
@@ -183,61 +103,45 @@ def cached_bert(text):
         total = p_legit + p_phish
 
         if total == 0:
-            return (0.5, 0.5)
+            return np.array([0.5, 0.5])
 
-        return (p_legit / total, p_phish / total)
+        return np.array([
+            p_legit / total,
+            p_phish / total
+        ])
 
     except Exception:
-        return (0.5, 0.5)
 
-
-# -----------------------------
-# Sequence Helper
-# -----------------------------
-def prepare_sequence(text):
-
-    seq = tokenizer.texts_to_sequences([text])
-
-    return pad_sequences(
-        seq,
-        maxlen=LSTM_MAXLEN,
-        padding="post",
-        truncating="post"
-    )
+        return np.array([0.5, 0.5])
 
 
 # -----------------------------
 # Ensemble Prediction
 # -----------------------------
+
 def ensemble_predict(text, weights=None):
-    load_models()
+
     if weights is None:
         weights = WEIGHTS
 
+    # Cache check
     if text in prediction_cache:
         return prediction_cache[text]
 
-    vec = vectorizer.transform([text])
-    pad = prepare_sequence(text)
+    # Parallel API calls
+    with ThreadPoolExecutor(max_workers=5) as executor:
 
-    with ThreadPoolExecutor(max_workers=4) as executor:
-
-        f_lr = executor.submit(lambda: lr.predict_proba(vec)[0])
-        f_rf = executor.submit(lambda: rf.predict_proba(vec)[0])
-        f_lstm = executor.submit(lambda: lstm_model.predict(pad, verbose=0)[0])
-        f_bilstm = executor.submit(lambda: bilstm_model.predict(pad, verbose=0)[0])
-        f_bert = executor.submit(lambda: cached_bert(text))
+        f_lr = executor.submit(query_model, LR_API, text)
+        f_rf = executor.submit(query_model, RF_API, text)
+        f_lstm = executor.submit(query_model, LSTM_API, text)
+        f_bilstm = executor.submit(query_model, BILSTM_API, text)
+        f_bert = executor.submit(query_model, BERT_API, text)
 
         p_lr = f_lr.result()
         p_rf = f_rf.result()
-
-        lstm_score = f_lstm.result()
-        bilstm_score = f_bilstm.result()
-
-        p_lstm = np.array([1 - lstm_score, lstm_score])
-        p_bilstm = np.array([1 - bilstm_score, bilstm_score])
-
-        p_bert = np.array(f_bert.result())
+        p_lstm = f_lstm.result()
+        p_bilstm = f_bilstm.result()
+        p_bert = f_bert.result()
 
     probs_dict = {
         "lr": p_lr,
@@ -280,67 +184,30 @@ def ensemble_predict(text, weights=None):
 
 
 # -----------------------------
-# Risk Levels
+# Risk Level Classification
 # -----------------------------
-def risk_level_from_ensemble(phish_prob):
 
-    if phish_prob >= 0.70:
+def risk_level_from_ensemble(prob):
+
+    if prob >= 0.70:
         return {
             "risk": "RED",
-            "color": "#e74c3c",
-            "action": "block",
-            "short_message": "High phishing probability"
+            "color": "#ff4d4f",
+            "short_message": "High probability of phishing detected.",
+            "action": "Avoid interacting with this email."
         }
 
-    elif phish_prob >= 0.50:
+    if prob >= 0.50:
         return {
             "risk": "YELLOW",
-            "color": "#f1c40f",
-            "action": "review",
-            "short_message": "This might be a phishing email"
+            "color": "#faad14",
+            "short_message": "This email looks suspicious.",
+            "action": "Verify sender before taking action."
         }
 
-    else:
-        return {
-            "risk": "GREEN",
-            "color": "#2ecc71",
-            "action": "allow",
-            "short_message": "Likely safe"
-        }
-
-def update_weights_from_feedback(model_name, correct):
-
-    global WEIGHTS
-
-    if model_name not in WEIGHTS:
-        return WEIGHTS
-
-    learning_rate = 0.02
-    decay = 0.995
-
-    # apply decay to all weights
-    for k in WEIGHTS:
-        WEIGHTS[k] *= decay
-
-    # update the specific model
-    if correct:
-        WEIGHTS[model_name] += learning_rate
-    else:
-        WEIGHTS[model_name] -= learning_rate
-
-    # ensure positive weights
-    WEIGHTS[model_name] = max(0.01, WEIGHTS[model_name])
-
-    # normalize
-    total = sum(WEIGHTS.values())
-
-    for k in WEIGHTS:
-        WEIGHTS[k] /= total
-
-    system_collection.update_one(
-        {"_id": "ensemble_weights"},
-        {"$set": {"weights": WEIGHTS}},
-        upsert=True
-    )
-
-    return WEIGHTS
+    return {
+        "risk": "GREEN",
+        "color": "#52c41a",
+        "short_message": "Email appears legitimate.",
+        "action": "No immediate threat detected."
+    }

@@ -10,6 +10,10 @@ db = client["phishing_db"]
 emails_collection = db["emails"]
 system_collection = db["system_state"]
 
+
 def store_email(data: dict):
     data["timestamp"] = datetime.utcnow()
-    emails_collection.insert_one(data)
+
+    result = emails_collection.insert_one(data)
+
+    return result.inserted_id
