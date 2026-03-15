@@ -34,18 +34,69 @@ headers = {"Authorization": f"Bearer {HF_TOKEN}"}
 # -----------------------------
 # Download Models
 # -----------------------------
+CACHE_DIR = "/tmp/model_cache"
+os.makedirs(CACHE_DIR, exist_ok=True)
+
 print("Downloading models from HuggingFace...")
 
-LR_PATH = hf_hub_download(repo_id=HF_MODEL_REPO, filename="logistic_model.pkl")
-RF_PATH = hf_hub_download(repo_id=HF_MODEL_REPO, filename="random_forest_model.pkl")
-VECT_PATH = hf_hub_download(repo_id=HF_MODEL_REPO, filename="tfidf_vectorizer.pkl")
-TOKENIZER_PATH = hf_hub_download(repo_id=HF_MODEL_REPO, filename="tokenizer.pkl")
+LR_PATH = hf_hub_download(repo_id=HF_MODEL_REPO, filename="logistic_model.pkl",cache_dir=CACHE_DIR)
+RF_PATH = hf_hub_download(repo_id=HF_MODEL_REPO, filename="random_forest_model.pkl",cache_dir=CACHE_DIR)
+VECT_PATH = hf_hub_download(repo_id=HF_MODEL_REPO, filename="tfidf_vectorizer.pkl",cache_dir=CACHE_DIR)
+TOKENIZER_PATH = hf_hub_download(repo_id=HF_MODEL_REPO, filename="tokenizer.pkl",cache_dir=CACHE_DIR)
 
-LSTM_MODEL_PATH = hf_hub_download(repo_id=HF_MODEL_REPO, filename="lstm_phishing_model.keras")
-BILSTM_MODEL_PATH = hf_hub_download(repo_id=HF_MODEL_REPO, filename="bilstm_attn_model.h5")
+LSTM_MODEL_PATH = hf_hub_download(repo_id=HF_MODEL_REPO, filename="lstm_phishing_model.keras",cache_dir=CACHE_DIR)
+BILSTM_MODEL_PATH = hf_hub_download(repo_id=HF_MODEL_REPO, filename="bilstm_attn_model.h5",cache_dir=CACHE_DIR)
 
 LSTM_MAXLEN = 100
 
+# -----------------------------
+# Lazy Model Loader
+# -----------------------------
+models_loaded = False
+
+lr = None
+rf = None
+vectorizer = None
+tokenizer = None
+lstm_model = None
+bilstm_model = None
+
+
+def load_models():
+
+    global models_loaded
+    global lr, rf, vectorizer, tokenizer
+    global lstm_model, bilstm_model
+
+    if models_loaded:
+        return
+
+    print("Loading models into memory...")
+
+    lr = joblib.load(LR_PATH)
+    rf = joblib.load(RF_PATH)
+    vectorizer = joblib.load(VECT_PATH)
+
+    tokenizer = joblib.load(TOKENIZER_PATH)
+
+    lstm_model = load_model(
+        LSTM_MODEL_PATH,
+        compile=False,
+        custom_objects={"Orthogonal": Orthogonal}
+    )
+
+    bilstm_model = load_model(
+        BILSTM_MODEL_PATH,
+        custom_objects={
+            "AttentionLayer": AttentionLayer,
+            "Orthogonal": Orthogonal
+        },
+        compile=False
+    )
+
+    models_loaded = True
+
+    print("Models loaded successfully")
 
 # -----------------------------
 # Default Weights
@@ -94,32 +145,6 @@ class AttentionLayer(Layer):
             axis=1
         )
         return context
-
-
-# -----------------------------
-# Load Models
-# -----------------------------
-print("Loading models...")
-
-lr = joblib.load(LR_PATH)
-rf = joblib.load(RF_PATH)
-vectorizer = joblib.load(VECT_PATH)
-
-tokenizer = joblib.load(TOKENIZER_PATH)
-
-lstm_model = load_model(
-    LSTM_MODEL_PATH,
-    compile=False
-)
-
-bilstm_model = load_model(
-    BILSTM_MODEL_PATH,
-    custom_objects={"AttentionLayer": AttentionLayer},
-    compile=False
-)
-
-print("Models loaded successfully")
-
 
 # -----------------------------
 # Cache
@@ -185,7 +210,7 @@ def prepare_sequence(text):
 # Ensemble Prediction
 # -----------------------------
 def ensemble_predict(text, weights=None):
-
+    load_models()
     if weights is None:
         weights = WEIGHTS
 
