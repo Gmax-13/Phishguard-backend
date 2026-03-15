@@ -19,7 +19,11 @@ from database import store_email, emails_collection
 
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+CORS(app,
+     resources={r"/*": {"origins": "*"}},
+     methods=["GET", "POST", "OPTIONS"],
+     allow_headers=["Content-Type", "Authorization"]
+     )
 
 
 @app.route("/")
@@ -81,7 +85,7 @@ def analyze_email():
         }), 500
 
 
-@app.route("/feedback", methods=["POST"])
+@app.route("/feedback", methods=["POST", "OPTIONS"])
 def receive_feedback():
 
     data = request.json
