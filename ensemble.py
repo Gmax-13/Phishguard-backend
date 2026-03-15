@@ -307,3 +307,40 @@ def risk_level_from_ensemble(phish_prob):
             "action": "allow",
             "short_message": "Likely safe"
         }
+
+def update_weights_from_feedback(model_name, correct):
+
+    global WEIGHTS
+
+    if model_name not in WEIGHTS:
+        return WEIGHTS
+
+    learning_rate = 0.02
+    decay = 0.995
+
+    # apply decay to all weights
+    for k in WEIGHTS:
+        WEIGHTS[k] *= decay
+
+    # update the specific model
+    if correct:
+        WEIGHTS[model_name] += learning_rate
+    else:
+        WEIGHTS[model_name] -= learning_rate
+
+    # ensure positive weights
+    WEIGHTS[model_name] = max(0.01, WEIGHTS[model_name])
+
+    # normalize
+    total = sum(WEIGHTS.values())
+
+    for k in WEIGHTS:
+        WEIGHTS[k] /= total
+
+    system_collection.update_one(
+        {"_id": "ensemble_weights"},
+        {"$set": {"weights": WEIGHTS}},
+        upsert=True
+    )
+
+    return WEIGHTS
