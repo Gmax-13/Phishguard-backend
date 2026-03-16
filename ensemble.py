@@ -81,35 +81,33 @@ def query_model(api_url, text):
 
     try:
 
-        r = session.post(
-            api_url,
-            json=payload,
-            timeout=8
-        )
+r = session.post(api_url, json=payload, timeout=8)
 
-        if r.status_code != 200:
-            return np.array([0.5, 0.5])
+print("HF RESPONSE:", r.text)
 
-        result = json.loads(r.text)
+if r.status_code != 200:
+    return np.array([0.5, 0.5])
 
-        if isinstance(result, list) and isinstance(result[0], list):
-            result = result[0]
+result = json.loads(r.text)
 
-        probs = {x["label"]: x["score"] for x in result}
+if isinstance(result, list) and isinstance(result[0], list):
+    result = result[0]
 
-        p_legit = (
-            probs.get("legitimate_email")
-            or probs.get("safe")
-            or probs.get("LABEL_0")
-            or 0
-        )
-        p_phish = (
-            probs.get("phishing_email")
-            or probs.get("phishing")
-            or probs.get("LABEL_1")
-            or 0
-        )
+probs = {x["label"]: x["score"] for x in result}
 
+p_legit = (
+    probs.get("legitimate_email")
+    or probs.get("safe")
+    or probs.get("LABEL_0")
+    or 0
+)
+
+p_phish = (
+    probs.get("phishing_email")
+    or probs.get("phishing")
+    or probs.get("LABEL_1")
+    or 0
+)
         total = p_legit + p_phish
 
         if total == 0:
