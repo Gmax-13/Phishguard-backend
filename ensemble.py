@@ -22,6 +22,9 @@ LSTM_API = os.getenv("LSTM_API")
 BILSTM_API = os.getenv("BILSTM_API")
 BERT_API = os.getenv("BERT_API")
 
+if not HF_TOKEN:
+    raise RuntimeError("HF_TOKEN environment variable missing")
+
 session = requests.Session()
 
 session.headers.update({
@@ -81,7 +84,11 @@ def query_model(api_url, text):
 
     try:
 
-        r = session.post(api_url, json=payload, timeout=8)
+        r = session.post(
+            api_url,
+            json=payload,
+            timeout=8
+        )
 
         print("HF RESPONSE:", r.text)
 
@@ -95,6 +102,7 @@ def query_model(api_url, text):
 
         probs = {x["label"]: x["score"] for x in result}
 
+        # Handle multiple label formats
         p_legit = (
             probs.get("legitimate_email")
             or probs.get("safe")
@@ -108,6 +116,7 @@ def query_model(api_url, text):
             or probs.get("LABEL_1")
             or 0
         )
+
         total = p_legit + p_phish
 
         if total == 0:
@@ -118,9 +127,11 @@ def query_model(api_url, text):
             p_phish / total
         ])
 
-        except Exception:
+    except Exception as e:
 
-            return np.array([0.5, 0.5])
+        print("MODEL ERROR:", str(e))
+
+        return np.array([0.5, 0.5])
 
 
 # -----------------------------
