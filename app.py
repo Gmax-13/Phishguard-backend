@@ -1,4 +1,5 @@
 import os
+import uuid
 import requests
 from flask import Flask, request, jsonify
 from cachetools import TTLCache
@@ -6,16 +7,16 @@ from cachetools import TTLCache
 from email_preprocessing import process_email_json
 
 
-###################################################
+##################################################
 # Flask App
-###################################################
+##################################################
 
 app = Flask(__name__)
 
 
-###################################################
+##################################################
 # Configuration
-###################################################
+##################################################
 
 SPACE_URL = os.environ.get(
     "SPACE_URL",
@@ -24,20 +25,19 @@ SPACE_URL = os.environ.get(
 
 CACHE_SIZE = int(os.environ.get("CACHE_SIZE", 2000))
 CACHE_TTL = int(os.environ.get("CACHE_TTL", 3600))
-
 SPACE_TIMEOUT = int(os.environ.get("SPACE_TIMEOUT", 25))
 
 
-###################################################
+##################################################
 # Prediction Cache
-###################################################
+##################################################
 
 prediction_cache = TTLCache(maxsize=CACHE_SIZE, ttl=CACHE_TTL)
 
 
-###################################################
-# Call HuggingFace Space
-###################################################
+##################################################
+# HuggingFace Space Inference
+##################################################
 
 def call_space_model(email_text):
 
@@ -54,18 +54,17 @@ def call_space_model(email_text):
     if "data" in result and len(result["data"]) > 0:
         return result["data"][0]
 
-    return result
+    raise Exception("Invalid response from inference Space")
 
 
-###################################################
+##################################################
 # Heuristic Risk Adjustment
-###################################################
+##################################################
 
 def apply_heuristics(prediction, url_features, image_features):
 
     score = prediction.get("phishing_probability", 0)
 
-    # URL heuristics
     if url_features.get("has_ip_url"):
         score += 0.05
 
@@ -78,28 +77,31 @@ def apply_heuristics(prediction, url_features, image_features):
     if url_features.get("suspicious_tld"):
         score += 0.05
 
-    # Image phishing heuristic
     if image_features.get("image_heavy"):
         score += 0.04
 
     score = min(score, 1.0)
 
     if score < 0.5:
-        risk = "GREEN"
+        risk_level = "GREEN"
+        label = "SAFE"
     elif score < 0.7:
-        risk = "YELLOW"
+        risk_level = "YELLOW"
+        label = "SUSPICIOUS"
     else:
-        risk = "RED"
+        risk_level = "RED"
+        label = "PHISHING"
 
     prediction["phishing_probability"] = score
-    prediction["risk_level"] = risk
+    prediction["risk_level"] = risk_level
+    prediction["label"] = label
 
     return prediction
 
 
-###################################################
-# Health Endpoint
-###################################################
+##################################################
+# Health Check
+##################################################
 
 @app.route("/", methods=["GET"])
 def health():
@@ -109,9 +111,9 @@ def health():
     })
 
 
-###################################################
-# Cache Stats Endpoint
-###################################################
+##################################################
+# Cache Statistics
+##################################################
 
 @app.route("/cache_stats", methods=["GET"])
 def cache_stats():
@@ -123,9 +125,9 @@ def cache_stats():
     })
 
 
-###################################################
-# Main Detection Endpoint
-###################################################
+##################################################
+# Main Email Analysis Endpoint
+##################################################
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
@@ -141,9 +143,9 @@ def analyze():
             }), 400
 
 
-        # -----------------------------
-        # Email preprocessing
-        # -----------------------------
+        ##################################################
+        # Email Preprocessing
+        ##################################################
 
         processed = process_email_json(email_json)
 
@@ -158,9 +160,9 @@ def analyze():
             }), 400
 
 
-        # -----------------------------
-        # Cache lookup
-        # -----------------------------
+        ##################################################
+        # Cache Lookup
+        ##################################################
 
         cache_key = email_text[:500]
 
@@ -175,9 +177,9 @@ def analyze():
             prediction_cache[cache_key] = prediction
 
 
-        # -----------------------------
-        # Apply heuristics
-        # -----------------------------
+        ##################################################
+        # Apply Heuristics
+        ##################################################
 
         prediction = apply_heuristics(
             prediction,
@@ -185,7 +187,22 @@ def analyze():
             image_features
         )
 
-        return jsonify(prediction)
+
+        ##################################################
+        # Prepare Extension-Compatible Response
+        ##################################################
+
+        email_id = str(uuid.uuid4())
+
+        response = {
+            "risk_level": prediction.get("risk_level", "GRAY"),
+            "phishing_probability": float(prediction.get("phishing_probability", 0)),
+            "label": prediction.get("label", "UNKNOWN"),
+            "explanation": "AI analysis of email content and links.",
+            "email_id": email_id
+        }
+
+        return jsonify(response)
 
 
     except Exception as e:
@@ -197,9 +214,9 @@ def analyze():
         }), 500
 
 
-###################################################
+##################################################
 # Feedback Endpoint
-###################################################
+##################################################
 
 @app.route("/feedback", methods=["POST"])
 def feedback():
@@ -214,10 +231,15 @@ def feedback():
                 "error": "No JSON received"
             }), 400
 
+        email_id = data.get("email_id")
+        true_label = data.get("true_label")
+
         return jsonify({
             "status": "feedback received",
-            "true_label": data.get("true_label")
+            "email_id": email_id,
+            "true_label": true_label
         })
+
 
     except Exception as e:
 
@@ -226,9 +248,9 @@ def feedback():
         }), 500
 
 
-###################################################
-# Run Server
-###################################################
+##################################################
+# Run App (Render Compatible)
+##################################################
 
 if __name__ == "__main__":
 
