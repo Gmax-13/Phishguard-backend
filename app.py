@@ -1,131 +1,152 @@
 import os
 import requests
-
 from flask import Flask, request, jsonify
-from flask_cors import CORS
-from bson import ObjectId
-from datetime import datetime, timezone
+from cachetools import TTLCache
 
 from email_preprocessing import process_email_json
-from ensemble import (
-    ensemble_predict,
-    risk_level_from_ensemble,
-    WEIGHTS,
-    prediction_cache
-)
-
-from database import store_email, emails_collection
 
 
-# -----------------------------
-# Flask App Initialization
-# -----------------------------
+##################################################
+# Flask app
+##################################################
 
 app = Flask(__name__)
 
-CORS(app, origins=[
-    "https://mail.google.com",
-    "chrome-extension://*"
-])
+
+##################################################
+# Config
+##################################################
+
+SPACE_URL = "https://savizzz-35-phishguard-inference.hf.space/run/predict"
+
+CACHE_SIZE = 2000
+CACHE_TTL = 3600
+
+prediction_cache = TTLCache(maxsize=CACHE_SIZE, ttl=CACHE_TTL)
 
 
-# -----------------------------
-# HuggingFace Model Warmup
-# -----------------------------
+##################################################
+# Space inference call
+##################################################
 
-def warm_models():
+def call_space_model(email_text):
 
-    urls = [
-        os.getenv("LR_API"),
-        os.getenv("RF_API"),
-        os.getenv("LSTM_API"),
-        os.getenv("BILSTM_API"),
-        os.getenv("BERT_API")
-    ]
+    response = requests.post(
+        SPACE_URL,
+        json={"data": [email_text]},
+        timeout=25
+    )
 
-    headers = {
-        "Authorization": f"Bearer {os.getenv('HF_TOKEN')}",
-        "Content-Type": "application/json"
-    }
+    response.raise_for_status()
 
-    payload = {
-        "inputs": "test email",
-        "options": {"wait_for_model": True}
-    }
+    result = response.json()
 
-    for url in urls:
+    if "data" in result:
+        return result["data"][0]
 
-        if not url:
-            continue
-
-        try:
-            requests.post(url, headers=headers, json=payload, timeout=5)
-        except:
-            pass
+    return result
 
 
-# Warm models at startup
-warm_models()
+##################################################
+# Heuristic adjustments
+##################################################
+
+def apply_heuristics(prediction, url_features, image_features):
+
+    score = prediction["phishing_probability"]
+
+    if url_features["has_ip_url"]:
+        score += 0.05
+
+    if url_features["has_punycode"]:
+        score += 0.07
+
+    if url_features["long_url"]:
+        score += 0.03
+
+    if url_features["suspicious_tld"]:
+        score += 0.05
+
+    if image_features["image_heavy"]:
+        score += 0.04
+
+    score = min(score, 1.0)
+
+    if score < 0.5:
+        risk = "GREEN"
+    elif score < 0.7:
+        risk = "YELLOW"
+    else:
+        risk = "RED"
+
+    prediction["phishing_probability"] = score
+    prediction["risk_level"] = risk
+
+    return prediction
 
 
-# -----------------------------
-# Health Check Endpoint
-# -----------------------------
+##################################################
+# Health endpoint
+##################################################
 
-@app.route("/")
+@app.route("/", methods=["GET"])
 def health():
 
     return jsonify({
-        "status": "PhishGuard API running"
+        "status": "PhishGuard backend running"
     })
 
 
-# -----------------------------
-# Email Analysis Endpoint
-# -----------------------------
+##################################################
+# Cache stats
+##################################################
+
+@app.route("/cache_stats", methods=["GET"])
+def cache_stats():
+
+    return jsonify({
+        "cache_size": len(prediction_cache),
+        "cache_limit": CACHE_SIZE,
+        "ttl_seconds": CACHE_TTL
+    })
+
+
+##################################################
+# Main detection endpoint
+##################################################
 
 @app.route("/analyze", methods=["POST"])
-def analyze_email():
+def analyze():
 
     try:
 
-        email_json = request.get_json(force=True)
+        email_json = request.json
 
         processed = process_email_json(email_json)
 
-        clean_text = processed["clean_text"]
+        email_text = processed["clean_text"]
+        url_features = processed["url_features"]
+        image_features = processed["image_features"]
 
-        result = ensemble_predict(clean_text)
+        cache_key = email_text[:500]
 
-        phish_prob = result["ensemble_probabilities"]["phishing_email"]
+        if cache_key in prediction_cache:
 
-        risk = risk_level_from_ensemble(phish_prob)
+            prediction = prediction_cache[cache_key]
 
-        inserted_id = store_email({
-            "sender": processed["sender"],
-            "subject": processed["subject"],
-            "clean_text": clean_text[:500],
-            "final_prediction": result["final_label"],
-            "final_confidence": result["final_confidence"],
-            "phishing_probability": phish_prob,
-            "risk_level": risk["risk"],
-            "model_outputs": result["per_model_probabilities"],
-            "feedback": None,
-            "weights_used": WEIGHTS.copy(),
-            "timestamp": datetime.now(timezone.utc)
-        })
+        else:
 
-        return jsonify({
-            "email_id": str(inserted_id),
-            "risk_level": risk["risk"],
-            "phishing_probability": phish_prob,
-            "confidence": result["final_confidence"],
-            "explanation": risk["short_message"],
-            "details": {
-                "color": risk["color"],
-                "action": risk["action"]
-            }
-        })
+            prediction = call_space_model(email_text)
+
+            prediction_cache[cache_key] = prediction
+
+        prediction = apply_heuristics(
+            prediction,
+            url_features,
+            image_features
+        )
+
+        return jsonify(prediction)
 
     except Exception as e:
 
@@ -134,31 +155,20 @@ def analyze_email():
         }), 500
 
 
-# -----------------------------
-# Feedback Endpoint (RL)
-# -----------------------------
+##################################################
+# Feedback endpoint
+##################################################
 
 @app.route("/feedback", methods=["POST"])
-def receive_feedback():
+def feedback():
 
     try:
 
         data = request.json
 
-        email_id = data.get("email_id")
-
-        true_label = data.get("true_label")
-
-        if not email_id or not true_label:
-            return jsonify({"error": "Invalid input"}), 400
-
-        emails_collection.update_one(
-            {"_id": ObjectId(email_id)},
-            {"$set": {"feedback": true_label}}
-        )
-
         return jsonify({
-            "message": "Feedback recorded"
+            "status": "feedback stored",
+            "true_label": data.get("true_label")
         })
 
     except Exception as e:
@@ -168,28 +178,12 @@ def receive_feedback():
         }), 500
 
 
-# -----------------------------
-# Cache Monitoring Endpoint
-# -----------------------------
-
-@app.route("/cache_stats")
-def cache_stats():
-
-    return jsonify({
-        "cache_size": len(prediction_cache)
-    })
-
-
-# -----------------------------
-# Run Flask App
-# -----------------------------
+##################################################
+# Local run
+##################################################
 
 if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 5000))
 
-    app.run(
-        host="0.0.0.0",
-        port=port,
-        debug=False
-    )
+    app.run(host="0.0.0.0", port=port)
