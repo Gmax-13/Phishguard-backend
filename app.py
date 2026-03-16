@@ -6,68 +6,80 @@ from cachetools import TTLCache
 from email_preprocessing import process_email_json
 
 
-##################################################
-# Flask app
-##################################################
+###################################################
+# Flask App
+###################################################
 
 app = Flask(__name__)
 
 
-##################################################
-# Config
-##################################################
+###################################################
+# Configuration
+###################################################
 
-SPACE_URL = "https://savizzz-35-phishguard-inference.hf.space/run/predict"
+SPACE_URL = os.environ.get(
+    "SPACE_URL",
+    "https://savizzz-35-phishguard-inference.hf.space/run/predict"
+)
 
-CACHE_SIZE = 2000
-CACHE_TTL = 3600
+CACHE_SIZE = int(os.environ.get("CACHE_SIZE", 2000))
+CACHE_TTL = int(os.environ.get("CACHE_TTL", 3600))
+
+SPACE_TIMEOUT = int(os.environ.get("SPACE_TIMEOUT", 25))
+
+
+###################################################
+# Prediction Cache
+###################################################
 
 prediction_cache = TTLCache(maxsize=CACHE_SIZE, ttl=CACHE_TTL)
 
 
-##################################################
-# Space inference call
-##################################################
+###################################################
+# Call HuggingFace Space
+###################################################
 
 def call_space_model(email_text):
 
     response = requests.post(
         SPACE_URL,
         json={"data": [email_text]},
-        timeout=25
+        timeout=SPACE_TIMEOUT
     )
 
     response.raise_for_status()
 
     result = response.json()
 
-    if "data" in result:
+    if "data" in result and len(result["data"]) > 0:
         return result["data"][0]
 
     return result
 
 
-##################################################
-# Heuristic adjustments
-##################################################
+###################################################
+# Heuristic Risk Adjustment
+###################################################
 
 def apply_heuristics(prediction, url_features, image_features):
 
-    score = prediction["phishing_probability"]
+    score = prediction.get("phishing_probability", 0)
 
-    if url_features["has_ip_url"]:
+    # URL heuristics
+    if url_features.get("has_ip_url"):
         score += 0.05
 
-    if url_features["has_punycode"]:
+    if url_features.get("has_punycode"):
         score += 0.07
 
-    if url_features["long_url"]:
+    if url_features.get("long_url"):
         score += 0.03
 
-    if url_features["suspicious_tld"]:
+    if url_features.get("suspicious_tld"):
         score += 0.05
 
-    if image_features["image_heavy"]:
+    # Image phishing heuristic
+    if image_features.get("image_heavy"):
         score += 0.04
 
     score = min(score, 1.0)
@@ -85,9 +97,9 @@ def apply_heuristics(prediction, url_features, image_features):
     return prediction
 
 
-##################################################
-# Health endpoint
-##################################################
+###################################################
+# Health Endpoint
+###################################################
 
 @app.route("/", methods=["GET"])
 def health():
@@ -97,9 +109,9 @@ def health():
     })
 
 
-##################################################
-# Cache stats
-##################################################
+###################################################
+# Cache Stats Endpoint
+###################################################
 
 @app.route("/cache_stats", methods=["GET"])
 def cache_stats():
@@ -111,22 +123,44 @@ def cache_stats():
     })
 
 
-##################################################
-# Main detection endpoint
-##################################################
+###################################################
+# Main Detection Endpoint
+###################################################
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
 
     try:
 
-        email_json = request.json
+        email_json = request.get_json(silent=True)
+
+        if not email_json:
+
+            return jsonify({
+                "error": "No JSON received"
+            }), 400
+
+
+        # -----------------------------
+        # Email preprocessing
+        # -----------------------------
 
         processed = process_email_json(email_json)
 
-        email_text = processed["clean_text"]
-        url_features = processed["url_features"]
-        image_features = processed["image_features"]
+        email_text = processed.get("clean_text", "")
+        url_features = processed.get("url_features", {})
+        image_features = processed.get("image_features", {})
+
+        if not email_text:
+
+            return jsonify({
+                "error": "Email text extraction failed"
+            }), 400
+
+
+        # -----------------------------
+        # Cache lookup
+        # -----------------------------
 
         cache_key = email_text[:500]
 
@@ -140,6 +174,11 @@ def analyze():
 
             prediction_cache[cache_key] = prediction
 
+
+        # -----------------------------
+        # Apply heuristics
+        # -----------------------------
+
         prediction = apply_heuristics(
             prediction,
             url_features,
@@ -148,26 +187,35 @@ def analyze():
 
         return jsonify(prediction)
 
+
     except Exception as e:
+
+        print("Analyze error:", e)
 
         return jsonify({
             "error": str(e)
         }), 500
 
 
-##################################################
-# Feedback endpoint
-##################################################
+###################################################
+# Feedback Endpoint
+###################################################
 
 @app.route("/feedback", methods=["POST"])
 def feedback():
 
     try:
 
-        data = request.json
+        data = request.get_json(silent=True)
+
+        if not data:
+
+            return jsonify({
+                "error": "No JSON received"
+            }), 400
 
         return jsonify({
-            "status": "feedback stored",
+            "status": "feedback received",
             "true_label": data.get("true_label")
         })
 
@@ -178,9 +226,9 @@ def feedback():
         }), 500
 
 
-##################################################
-# Local run
-##################################################
+###################################################
+# Run Server
+###################################################
 
 if __name__ == "__main__":
 
