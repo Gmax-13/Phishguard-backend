@@ -97,8 +97,18 @@ def query_model(api_url, text):
 
         probs = {x["label"]: x["score"] for x in result}
 
-        p_legit = probs.get("legitimate_email", 0)
-        p_phish = probs.get("phishing_email", 0)
+        p_legit = (
+            probs.get("legitimate_email")
+            or probs.get("safe")
+            or probs.get("LABEL_0")
+            or 0
+        )
+        p_phish = (
+            probs.get("phishing_email")
+            or probs.get("phishing")
+            or probs.get("LABEL_1")
+            or 0
+        )
 
         total = p_legit + p_phish
 
