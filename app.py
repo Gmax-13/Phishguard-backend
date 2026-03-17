@@ -18,16 +18,14 @@ app = Flask(__name__)
 # Configuration
 ##################################################
 
-# The Gradio Space /run/predict endpoint
-SPACE_URL = os.environ.get(
-    "SPACE_URL",
-    "https://savizzz-35-phishguard-inference.hf.space/run/predict"
+# Gradio 5.x uses a two-step event protocol under /gradio_api/call/
+SPACE_BASE = os.environ.get(
+    "SPACE_BASE",
+    "https://savizzz-35-phishguard-inference.hf.space"
 )
 
-CACHE_SIZE = int(os.environ.get("CACHE_SIZE", 2000))
-CACHE_TTL  = int(os.environ.get("CACHE_TTL", 3600))
-
-# HF Spaces can be slow on cold start — 60s timeout is safer
+CACHE_SIZE    = int(os.environ.get("CACHE_SIZE", 2000))
+CACHE_TTL     = int(os.environ.get("CACHE_TTL", 3600))
 SPACE_TIMEOUT = int(os.environ.get("SPACE_TIMEOUT", 60))
 
 
@@ -55,30 +53,57 @@ prediction_cache = TTLCache(maxsize=CACHE_SIZE, ttl=CACHE_TTL)
 ##################################################
 
 def call_space_model(email_text):
+    """
+    Gradio 5.x two-step event protocol:
+      Step 1 — POST /gradio_api/call/run_detection  →  {"event_id": "..."}
+      Step 2 — GET  /gradio_api/call/run_detection/{event_id}  →  SSE stream
+                    last event line: data: {"data": [<result>]}
+    """
 
-    payload = {"data": [email_text]}
+    call_url   = f"{SPACE_BASE}/gradio_api/call/run_detection"
+    headers    = {"Content-Type": "application/json"}
 
-    response = requests.post(
-        SPACE_URL,
-        json=payload,
+    # --- Step 1: submit the job ---
+    r1 = requests.post(
+        call_url,
+        json={"data": [email_text]},
+        headers=headers,
         timeout=SPACE_TIMEOUT
     )
+    r1.raise_for_status()
 
-    response.raise_for_status()
+    event_id = r1.json().get("event_id")
+    if not event_id:
+        raise Exception(f"No event_id in Gradio response: {r1.text}")
 
-    raw = response.json()
+    # --- Step 2: poll the SSE result stream ---
+    result_url = f"{call_url}/{event_id}"
+    r2 = requests.get(result_url, stream=True, timeout=SPACE_TIMEOUT)
+    r2.raise_for_status()
 
-    # --- Unwrap Gradio envelope ---
-    if "data" in raw and isinstance(raw["data"], list) and len(raw["data"]) > 0:
-        result = raw["data"][0]
+    last_data_line = None
+    for raw_line in r2.iter_lines():
+        if not raw_line:
+            continue
+        line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
+        if line.startswith("data:"):
+            last_data_line = line[len("data:"):].strip()
+
+    if not last_data_line:
+        raise Exception("No data received from Gradio SSE stream")
+
+    import json as _json
+    envelope = _json.loads(last_data_line)
+
+    # Gradio wraps result in {"data": [<actual_result>]}
+    if "data" in envelope and isinstance(envelope["data"], list) and envelope["data"]:
+        result = envelope["data"][0]
     else:
-        raise Exception(f"Unexpected Space response format: {raw}")
+        raise Exception(f"Unexpected Gradio SSE envelope: {envelope}")
 
-    # --- Handle Space-side errors ---
     if isinstance(result, dict) and "error" in result:
         raise Exception(f"Space inference error: {result['error']}")
 
-    # --- Validate required keys ---
     if not isinstance(result, dict) or "phishing_probability" not in result:
         raise Exception(f"Missing phishing_probability in Space response: {result}")
 
