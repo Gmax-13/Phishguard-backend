@@ -95,8 +95,12 @@ def call_space_model(email_text):
     import json as _json
     envelope = _json.loads(last_data_line)
 
-    # Gradio wraps result in {"data": [<actual_result>]}
-    if "data" in envelope and isinstance(envelope["data"], list) and envelope["data"]:
+    # Gradio SSE data line is either:
+    #   a list directly: [{...}]
+    #   or a dict:       {"data": [{...}]}
+    if isinstance(envelope, list) and envelope:
+        result = envelope[0]
+    elif isinstance(envelope, dict) and "data" in envelope and envelope["data"]:
         result = envelope["data"][0]
     else:
         raise Exception(f"Unexpected Gradio SSE envelope: {envelope}")
