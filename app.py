@@ -227,15 +227,32 @@ def analyze():
         # --------------------------------------------------
         # Build extension-compatible response
         # --------------------------------------------------
+        email_id = str(uuid.uuid4())
+
         response_body = {
             "risk_level":           prediction.get("risk_level", "GRAY"),
             "phishing_probability": float(prediction.get("phishing_probability", 0)),
             "label":                prediction.get("label", "UNKNOWN"),
             "explanation":          "AI analysis of email content and links.",
-            "email_id":             str(uuid.uuid4()),
-            # Forward per-model scores to the popup for the accordion
+            "email_id":             email_id,
             "model_outputs":        prediction.get("model_outputs", {})
         }
+
+        # --------------------------------------------------
+        # Persist to MongoDB
+        # --------------------------------------------------
+        store_email({
+            "type":                 "analysis",
+            "email_id":             email_id,
+            "sender":               processed.get("sender", ""),
+            "subject":              processed.get("subject", ""),
+            "risk_level":           response_body["risk_level"],
+            "label":                response_body["label"],
+            "phishing_probability": response_body["phishing_probability"],
+            "model_outputs":        response_body["model_outputs"],
+            "url_features":         url_features,
+            "image_features":       image_features,
+        })
 
         return jsonify(response_body)
 
