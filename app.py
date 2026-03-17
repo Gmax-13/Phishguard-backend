@@ -5,6 +5,7 @@ from flask import Flask, request, jsonify
 from cachetools import TTLCache
 
 from email_preprocessing import process_email_json
+from database import store_email
 
 
 ##################################################
@@ -257,10 +258,19 @@ def feedback():
         if not data:
             return jsonify({"error": "No JSON received"}), 400
 
+        email_id   = data.get("email_id")
+        true_label = data.get("true_label")
+
+        store_email({
+            "type":       "feedback",
+            "email_id":   email_id,
+            "true_label": true_label
+        })
+
         return jsonify({
             "status":     "feedback received",
-            "email_id":   data.get("email_id"),
-            "true_label": data.get("true_label")
+            "email_id":   email_id,
+            "true_label": true_label
         })
 
     except Exception as e:
