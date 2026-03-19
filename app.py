@@ -27,7 +27,7 @@ SPACE_BASE = os.environ.get(
 
 CACHE_SIZE    = int(os.environ.get("CACHE_SIZE", 2000))
 CACHE_TTL     = int(os.environ.get("CACHE_TTL", 3600))
-SPACE_TIMEOUT = int(os.environ.get("SPACE_TIMEOUT", 60))
+SPACE_TIMEOUT = int(os.environ.get("SPACE_TIMEOUT", 120))
 
 
 ##################################################
@@ -168,6 +168,29 @@ def apply_heuristics(prediction, url_features, image_features):
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({"status": "PhishGuard backend running"})
+
+
+##################################################
+# Warmup Endpoint
+# Hit this to wake both Render + HF Space at once.
+# Point your cron job at /warmup instead of /
+##################################################
+
+@app.route("/warmup", methods=["GET"])
+def warmup():
+    try:
+        r = requests.get(
+            f"{SPACE_BASE}/gradio_api/info",
+            timeout=30
+        )
+        space_status = "awake" if r.status_code == 200 else f"status {r.status_code}"
+    except Exception as e:
+        space_status = f"unreachable: {str(e)}"
+
+    return jsonify({
+        "backend": "awake",
+        "hf_space": space_status
+    })
 
 
 ##################################################
