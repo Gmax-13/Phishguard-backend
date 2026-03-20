@@ -4,16 +4,16 @@ blacklist.py — Domain & URL Blacklist Checker
 
 Two independent checks run in parallel:
 
-1. SENDER DOMAIN CHECK (OpenPhish)
+1. SENDER DOMAIN CHECK (PhishTank)
    Extract the domain from the sender email and check it against
-   OpenPhish's active phishing URL feed. OpenPhish is URL-based
-   so we match the sender domain against any OpenPhish entry that
+   PhishTank's verified phishing URL database. PhishTank is URL-based
+   so we match the sender domain against any PhishTank entry that
    contains that domain.
 
-2. EMAIL LINK CHECK (URLhaus + OpenPhish)
+2. EMAIL LINK CHECK (URLhaus + PhishTank)
    Each URL extracted from the email body is checked against:
      - URLhaus (abuse.ch) — malware/phishing URL feed
-     - OpenPhish — active phishing URL feed
+     - PhishTank — verified phishing URL database
 
 Both feeds are cached locally in memory and refreshed every 6 hours
 so we don't hit the external APIs on every single email scan.
@@ -211,9 +211,8 @@ def _refresh_cache(force: bool = False):
 
 
 def _ensure_cache():
-    """Refresh cache if not yet loaded."""
-    if _cache["last_updated"] is None:
-        _refresh_cache(force=True)
+    """Return True if cache is ready, False if still loading."""
+    return _cache["last_updated"] is not None
 
 
 # -------------------------------------------------------
@@ -233,7 +232,8 @@ def check_sender_domain(sender_email: str) -> dict:
           "source":  "urlhaus" | "phishtank" | None
         }
     """
-    _ensure_cache()
+    if not _ensure_cache():
+        return {"flagged": False, "domain": _extract_domain(sender_email), "source": None}
 
     domain = _extract_domain(sender_email)
 
@@ -266,7 +266,8 @@ def check_urls(links: list) -> dict:
           "total_checked": int
         }
     """
-    _ensure_cache()
+    if not _ensure_cache():
+        return {"flagged": False, "flagged_urls": [], "total_checked": len(links)}
 
     flagged_urls = []
 
@@ -355,18 +356,22 @@ def run_blacklist_checks(sender: str, links: list) -> dict:
 
 # -------------------------------------------------------
 # Background refresh thread
-# Starts on import — refreshes every 6 hours automatically
+# Delays initial load by 10 seconds so Render's health
+# check passes before any network calls are made.
+# All feed errors are caught and logged — never crashes.
 # -------------------------------------------------------
 
 def _background_refresh():
     """Run in a daemon thread to keep the cache warm."""
     import time
+    # Delay first load so gunicorn binds to port and passes
+    # Render's health check before making any external requests
+    time.sleep(10)
     while True:
         try:
             _refresh_cache()
         except Exception as e:
             logger.error(f"Background blacklist refresh error: {e}")
-        # Sleep for slightly less than TTL so we always have fresh data
         time.sleep((CACHE_TTL_HOURS - 0.5) * 3600)
 
 
