@@ -8,6 +8,7 @@ from cachetools import TTLCache
 from email_preprocessing import process_email_json
 from database import store_email
 from rl_weights import get_weights, apply_feedback
+from blacklist import run_blacklist_checks
 
 
 ##################################################
@@ -239,10 +240,58 @@ def analyze():
         email_text     = processed.get("clean_text", "")
         url_features   = processed.get("url_features", {})
         image_features = processed.get("image_features", {})
+        links          = email_json.get("links", [])
 
         if not email_text:
             return jsonify({"error": "Email text extraction failed"}), 400
 
+        # --------------------------------------------------
+        # Blacklist check — runs before inference
+        # If sender domain or any link matches a known phishing
+        # blacklist (PhishTank / URLhaus), return RED immediately
+        # without calling the HF Space at all.
+        # --------------------------------------------------
+        sender = processed.get("sender", "")
+
+        blacklist_result = run_blacklist_checks(sender, links)
+
+        if blacklist_result["blacklisted"]:
+            email_id = str(uuid.uuid4())
+
+            store_email({
+                "type":                 "analysis",
+                "email_id":             email_id,
+                "sender":               sender,
+                "subject":              processed.get("subject", ""),
+                "risk_level":           "RED",
+                "label":                "PHISHING",
+                "phishing_probability": 1.0,
+                "model_outputs":        {},
+                "weights_used":         get_weights(),
+                "url_features":         url_features,
+                "image_features":       image_features,
+                "blacklist_hit":        True,
+                "blacklist_detail":     blacklist_result,
+            })
+
+            return jsonify({
+                "risk_level":           "RED",
+                "label":                "PHISHING",
+                "phishing_probability": 1.0,
+                "explanation":          blacklist_result["explanation"],
+                "email_id":             email_id,
+                "model_outputs":        {},
+                "weights_used":         get_weights(),
+                "blacklist_hit":        True,
+                "blacklist_detail": {
+                    "sender_flagged": blacklist_result["sender_check"]["flagged"],
+                    "sender_domain":  blacklist_result["sender_check"]["domain"],
+                    "sender_source":  blacklist_result["sender_check"]["source"],
+                    "flagged_urls":   blacklist_result["url_check"]["flagged_urls"],
+                },
+            })
+
+        # --------------------------------------------------
         # Cache lookup
         cache_key = email_text[:500]
 
