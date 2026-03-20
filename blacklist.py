@@ -4,16 +4,16 @@ blacklist.py — Domain & URL Blacklist Checker
 
 Two independent checks run in parallel:
 
-1. SENDER DOMAIN CHECK (PhishTank)
+1. SENDER DOMAIN CHECK (OpenPhish)
    Extract the domain from the sender email and check it against
-   PhishTank's verified phishing URL database. PhishTank is URL-based
-   so we match the sender domain against any PhishTank entry that
+   OpenPhish's active phishing URL feed. OpenPhish is URL-based
+   so we match the sender domain against any OpenPhish entry that
    contains that domain.
 
-2. EMAIL LINK CHECK (URLhaus + PhishTank)
+2. EMAIL LINK CHECK (URLhaus + OpenPhish)
    Each URL extracted from the email body is checked against:
      - URLhaus (abuse.ch) — malware/phishing URL feed
-     - PhishTank — verified phishing URL database
+     - OpenPhish — active phishing URL feed
 
 Both feeds are cached locally in memory and refreshed every 6 hours
 so we don't hit the external APIs on every single email scan.
@@ -40,8 +40,9 @@ logger = logging.getLogger(__name__)
 # URLhaus — CSV of active malicious URLs (no auth needed)
 URLHAUS_CSV_URL = "https://urlhaus.abuse.ch/downloads/csv_recent/"
 
-# PhishTank — JSON feed of verified phishing URLs (no auth for basic feed)
-PHISHTANK_JSON_URL = "https://data.phishtank.com/data/online-valid.json"
+# OpenPhish — plain text feed, one URL per line, no auth needed
+# Updated every 12 hours, contains active phishing URLs
+OPENPHISH_TXT_URL = "https://openphish.com/feed.txt"
 
 # Cache refresh interval
 CACHE_TTL_HOURS = 6
@@ -51,12 +52,12 @@ CACHE_TTL_HOURS = 6
 # -------------------------------------------------------
 
 _cache = {
-    "urlhaus_domains": set(),
-    "urlhaus_urls":    set(),
-    "phishtank_domains": set(),
-    "phishtank_urls":    set(),
-    "last_updated":    None,
-    "lock":            threading.Lock(),
+    "urlhaus_domains":   set(),
+    "urlhaus_urls":      set(),
+    "openphish_domains": set(),
+    "openphish_urls":    set(),
+    "last_updated":      None,
+    "lock":              threading.Lock(),
 }
 
 
@@ -140,28 +141,26 @@ def _load_urlhaus():
     return domains, urls
 
 
-def _load_phishtank():
+def _load_openphish():
     """
-    Fetch PhishTank JSON feed and extract domains + full URLs.
-    Each entry: {"url": "...", "verified": "yes", ...}
-    Note: The full feed does not require an API key.
+    Fetch OpenPhish plain-text feed.
+    Format: one URL per line, no header, no auth required.
+    Updated every ~12 hours by OpenPhish.
     """
     domains = set()
     urls    = set()
 
     try:
         r = requests.get(
-            PHISHTANK_JSON_URL,
-            timeout=30,
+            OPENPHISH_TXT_URL,
+            timeout=20,
             headers={"User-Agent": "PhishGuard/1.0 phishguard-project"}
         )
         r.raise_for_status()
 
-        entries = r.json()
-
-        for entry in entries:
-            raw_url = entry.get("url", "").strip()
-            if not raw_url:
+        for line in r.text.splitlines():
+            raw_url = line.strip()
+            if not raw_url or not raw_url.startswith("http"):
                 continue
 
             urls.add(_normalise_url(raw_url))
@@ -169,10 +168,10 @@ def _load_phishtank():
             if domain:
                 domains.add(domain)
 
-        logger.info(f"PhishTank loaded: {len(urls)} URLs, {len(domains)} domains")
+        logger.info(f"OpenPhish loaded: {len(urls)} URLs, {len(domains)} domains")
 
     except Exception as e:
-        logger.warning(f"PhishTank feed load failed: {e}")
+        logger.warning(f"OpenPhish feed load failed: {e}")
 
     return domains, urls
 
@@ -198,16 +197,16 @@ def _refresh_cache(force: bool = False):
         logger.info("Refreshing blacklist cache...")
 
         uh_domains, uh_urls       = _load_urlhaus()
-        pt_domains, pt_urls       = _load_phishtank()
+        op_domains, op_urls       = _load_openphish()
 
         _cache["urlhaus_domains"]   = uh_domains
         _cache["urlhaus_urls"]      = uh_urls
-        _cache["phishtank_domains"] = pt_domains
-        _cache["phishtank_urls"]    = pt_urls
+        _cache["openphish_domains"] = op_domains
+        _cache["openphish_urls"]    = op_urls
         _cache["last_updated"]      = now
 
-        total_domains = len(uh_domains | pt_domains)
-        total_urls    = len(uh_urls | pt_urls)
+        total_domains = len(uh_domains | op_domains)
+        total_urls    = len(uh_urls | op_urls)
         logger.info(f"Blacklist cache refreshed: {total_domains} domains, {total_urls} URLs")
 
 
@@ -244,8 +243,8 @@ def check_sender_domain(sender_email: str) -> dict:
     if domain in _cache["urlhaus_domains"]:
         return {"flagged": True, "domain": domain, "source": "URLhaus"}
 
-    if domain in _cache["phishtank_domains"]:
-        return {"flagged": True, "domain": domain, "source": "PhishTank"}
+    if domain in _cache["openphish_domains"]:
+        return {"flagged": True, "domain": domain, "source": "OpenPhish"}
 
     return {"flagged": False, "domain": domain, "source": None}
 
@@ -271,8 +270,8 @@ def check_urls(links: list) -> dict:
 
     flagged_urls = []
 
-    all_domains = _cache["urlhaus_domains"] | _cache["phishtank_domains"]
-    all_urls    = _cache["urlhaus_urls"]    | _cache["phishtank_urls"]
+    all_domains = _cache["urlhaus_domains"] | _cache["openphish_domains"]
+    all_urls    = _cache["urlhaus_urls"]    | _cache["openphish_urls"]
 
     for link in links:
         raw_url = link.get("url", "").strip()
@@ -284,13 +283,13 @@ def check_urls(links: list) -> dict:
 
         # Full URL match
         if norm_url in all_urls:
-            source = "URLhaus" if norm_url in _cache["urlhaus_urls"] else "PhishTank"
+            source = "URLhaus" if norm_url in _cache["urlhaus_urls"] else "OpenPhish"
             flagged_urls.append({"url": raw_url, "domain": domain, "source": source})
             continue
 
         # Domain-only match (catches URL variations on a known bad domain)
         if domain and domain in all_domains:
-            source = "URLhaus" if domain in _cache["urlhaus_domains"] else "PhishTank"
+            source = "URLhaus" if domain in _cache["urlhaus_domains"] else "OpenPhish"
             flagged_urls.append({"url": raw_url, "domain": domain, "source": source})
 
     return {
