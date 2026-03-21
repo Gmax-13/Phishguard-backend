@@ -54,8 +54,10 @@ CACHE_TTL_HOURS = 6
 _cache = {
     "urlhaus_domains":   set(),
     "urlhaus_urls":      set(),
+    "urlhaus_base_urls": set(),   # scheme+host+port only, for prefix matching
     "openphish_domains": set(),
     "openphish_urls":    set(),
+    "openphish_base_urls": set(),
     "last_updated":      None,
     "lock":              threading.Lock(),
 }
@@ -100,6 +102,17 @@ def _normalise_url(url: str) -> str:
     return url.strip().lower().rstrip("/")
 
 
+def _extract_base_url(url: str) -> str:
+    """Extract scheme+host+port — used for prefix matching.
+    'http://27.153.152.117:41069/path' -> 'http://27.153.152.117:41069'
+    """
+    try:
+        parsed = urlparse(url.strip().lower())
+        return f"{parsed.scheme}://{parsed.netloc}"
+    except Exception:
+        return ""
+
+
 # -------------------------------------------------------
 # Feed loaders
 # -------------------------------------------------------
@@ -110,8 +123,9 @@ def _load_urlhaus():
     CSV columns: id, dateadded, url, url_status, last_online, threat, tags, urlhaus_link, reporter
     Lines starting with # are comments.
     """
-    domains = set()
-    urls    = set()
+    domains   = set()
+    urls      = set()
+    base_urls = set()
 
     try:
         r = requests.get(URLHAUS_CSV_URL, timeout=20)
@@ -132,23 +146,22 @@ def _load_urlhaus():
             domain = _extract_domain(raw_url)
             if domain:
                 domains.add(domain)
+            base = _extract_base_url(raw_url)
+            if base:
+                base_urls.add(base)
 
         logger.info(f"URLhaus loaded: {len(urls)} URLs, {len(domains)} domains")
 
     except Exception as e:
         logger.warning(f"URLhaus feed load failed: {e}")
 
-    return domains, urls
+    return domains, urls, base_urls
 
 
 def _load_openphish():
-    """
-    Fetch OpenPhish plain-text feed.
-    Format: one URL per line, no header, no auth required.
-    Updated every ~12 hours by OpenPhish.
-    """
-    domains = set()
-    urls    = set()
+    domains   = set()
+    urls      = set()
+    base_urls = set()
 
     try:
         r = requests.get(
@@ -167,13 +180,16 @@ def _load_openphish():
             domain = _extract_domain(raw_url)
             if domain:
                 domains.add(domain)
+            base = _extract_base_url(raw_url)
+            if base:
+                base_urls.add(base)
 
         logger.info(f"OpenPhish loaded: {len(urls)} URLs, {len(domains)} domains")
 
     except Exception as e:
         logger.warning(f"OpenPhish feed load failed: {e}")
 
-    return domains, urls
+    return domains, urls, base_urls
 
 
 # -------------------------------------------------------
@@ -196,14 +212,16 @@ def _refresh_cache(force: bool = False):
 
         logger.info("Refreshing blacklist cache...")
 
-        uh_domains, uh_urls       = _load_urlhaus()
-        op_domains, op_urls       = _load_openphish()
+        uh_domains, uh_urls, uh_base       = _load_urlhaus()
+        op_domains, op_urls, op_base       = _load_openphish()
 
-        _cache["urlhaus_domains"]   = uh_domains
-        _cache["urlhaus_urls"]      = uh_urls
-        _cache["openphish_domains"] = op_domains
-        _cache["openphish_urls"]    = op_urls
-        _cache["last_updated"]      = now
+        _cache["urlhaus_domains"]    = uh_domains
+        _cache["urlhaus_urls"]       = uh_urls
+        _cache["urlhaus_base_urls"]  = uh_base
+        _cache["openphish_domains"]  = op_domains
+        _cache["openphish_urls"]     = op_urls
+        _cache["openphish_base_urls"]= op_base
+        _cache["last_updated"]       = now
 
         total_domains = len(uh_domains | op_domains)
         total_urls    = len(uh_urls | op_urls)
@@ -281,16 +299,29 @@ def check_urls(links: list) -> dict:
 
         norm_url = _normalise_url(raw_url)
         domain   = _extract_domain(raw_url)
+        flagged  = False
+        source   = None
 
-        # Full URL match
+        # 1. Exact full URL match
         if norm_url in all_urls:
-            source = "URLhaus" if norm_url in _cache["urlhaus_urls"] else "OpenPhish"
-            flagged_urls.append({"url": raw_url, "domain": domain, "source": source})
-            continue
+            source  = "URLhaus" if norm_url in _cache["urlhaus_urls"] else "OpenPhish"
+            flagged = True
 
-        # Domain-only match (catches URL variations on a known bad domain)
-        if domain and domain in all_domains:
-            source = "URLhaus" if domain in _cache["urlhaus_domains"] else "OpenPhish"
+        # 2. Domain-only match (catches URL path variations on a known bad domain)
+        elif domain and domain in all_domains:
+            source  = "URLhaus" if domain in _cache["urlhaus_domains"] else "OpenPhish"
+            flagged = True
+
+        # 3. Base URL match (scheme+host+port) — catches path variations
+        # e.g. URLhaus has "http://27.153.152.117:41069", email has "http://27.153.152.117:41069/i"
+        else:
+            base = _extract_base_url(raw_url)
+            all_bases = _cache["urlhaus_base_urls"] | _cache["openphish_base_urls"]
+            if base and base in all_bases:
+                source  = "URLhaus" if base in _cache["urlhaus_base_urls"] else "OpenPhish"
+                flagged = True
+
+        if flagged:
             flagged_urls.append({"url": raw_url, "domain": domain, "source": source})
 
     return {
