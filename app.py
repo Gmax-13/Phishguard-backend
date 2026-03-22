@@ -8,7 +8,7 @@ from cachetools import TTLCache
 from email_preprocessing import process_email_json
 from database import store_email
 from rl_weights import get_weights, apply_feedback
-from blacklist import run_blacklist_checks
+from blacklist import run_blacklist_checks, _refresh_cache
 
 
 ##################################################
@@ -16,6 +16,21 @@ from blacklist import run_blacklist_checks
 ##################################################
 
 app = Flask(__name__)
+
+
+##################################################
+# Force-load blacklist cache on startup
+# Runs synchronously before gunicorn serves any
+# requests — guarantees the cache is hot from
+# the very first /analyze call.
+##################################################
+
+try:
+    print("Loading blacklist cache on startup...")
+    _refresh_cache(force=True)
+    print("Blacklist cache loaded successfully")
+except Exception as e:
+    print(f"Blacklist startup load failed (non-fatal): {e}")
 
 
 ##################################################

@@ -393,17 +393,16 @@ def run_blacklist_checks(sender: str, links: list) -> dict:
 # -------------------------------------------------------
 
 def _background_refresh():
-    """Run in a daemon thread to keep the cache warm."""
+    """Periodically refresh the cache every 6 hours."""
     import time
-    # Delay 2 seconds so gunicorn binds to port and passes
-    # Render's health check before making any external requests
-    time.sleep(2)
+    # First sleep is the full TTL since app.py already loaded on startup
+    time.sleep(CACHE_TTL_HOURS * 3600)
     while True:
         try:
             _refresh_cache()
         except Exception as e:
             logger.error(f"Background blacklist refresh error: {e}")
-        time.sleep((CACHE_TTL_HOURS - 0.5) * 3600)
+        time.sleep(CACHE_TTL_HOURS * 3600)
 
 
 _refresh_thread = threading.Thread(target=_background_refresh, daemon=True)
