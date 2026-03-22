@@ -196,8 +196,19 @@ def warmup():
     })
 
 
+@app.route("/blacklist_status", methods=["GET"])
+def blacklist_status():
+    from blacklist import _cache
+    return jsonify({
+        "loaded":          _cache["last_updated"] is not None,
+        "last_updated":    _cache["last_updated"].isoformat() if _cache["last_updated"] else None,
+        "urlhaus_domains": len(_cache["urlhaus_domains"]),
+        "urlhaus_urls":    len(_cache["urlhaus_urls"]),
+        "openphish_urls":  len(_cache["openphish_urls"]),
+    })
+
+
 ##################################################
-# Cache Statistics
 ##################################################
 
 @app.route("/cache_stats", methods=["GET"])

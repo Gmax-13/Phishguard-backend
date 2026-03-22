@@ -228,8 +228,8 @@ def _refresh_cache(force: bool = False):
         logger.info(f"Blacklist cache refreshed: {total_domains} domains, {total_urls} URLs")
 
 
-def _ensure_cache():
-    """Return True if cache is ready, False if still loading."""
+def _ensure_cache() -> bool:
+    """Return True if cache is ready. Triggers a background load if not yet started."""
     return _cache["last_updated"] is not None
 
 
@@ -395,9 +395,9 @@ def run_blacklist_checks(sender: str, links: list) -> dict:
 def _background_refresh():
     """Run in a daemon thread to keep the cache warm."""
     import time
-    # Delay first load so gunicorn binds to port and passes
+    # Delay 2 seconds so gunicorn binds to port and passes
     # Render's health check before making any external requests
-    time.sleep(10)
+    time.sleep(2)
     while True:
         try:
             _refresh_cache()
